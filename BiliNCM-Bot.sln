@@ -1,0 +1,16 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BiliNCM-Bot", "BiliNCM-Bot\BiliNCM-Bot.csproj", "{9C8673BF-9D8D-42A8-944B-970C8C8DC310}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{9C8673BF-9D8D-42A8-944B-970C8C8DC310}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9C8673BF-9D8D-42A8-944B-970C8C8DC310}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9C8673BF-9D8D-42A8-944B-970C8C8DC310}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9C8673BF-9D8D-42A8-944B-970C8C8DC310}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
