@@ -170,6 +170,19 @@
           }
         }
       },
+      "NuGet.Versioning/6.14.0": {
+        "type": "package",
+        "compile": {
+          "lib/netstandard2.0/NuGet.Versioning.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/netstandard2.0/NuGet.Versioning.dll": {
+            "related": ".xml"
+          }
+        }
+      },
       "System.Security.AccessControl/4.7.0": {
         "type": "package",
         "dependencies": {
@@ -213,6 +226,22 @@
           "runtimes/win/lib/netcoreapp2.1/System.Security.Principal.Windows.dll": {
             "assetType": "runtime",
             "rid": "win"
+          }
+        }
+      },
+      "Velopack/0.0.1298": {
+        "type": "package",
+        "dependencies": {
+          "NuGet.Versioning": "6.14.0"
+        },
+        "compile": {
+          "lib/net9.0/Velopack.dll": {
+            "related": ".xml"
+          }
+        },
+        "runtime": {
+          "lib/net9.0/Velopack.dll": {
+            "related": ".xml"
           }
         }
       }
@@ -423,6 +452,23 @@
         "packageIcon.png"
       ]
     },
+    "NuGet.Versioning/6.14.0": {
+      "sha512": "4v4blkhCv8mpKtfx+z0G/X0daVCzdIaHSC51GkUspugi5JIMn2Bo8xm5PdZYF0U68gOBfz/+aPWMnpRd85Jbow==",
+      "type": "package",
+      "path": "nuget.versioning/6.14.0",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "README.md",
+        "icon.png",
+        "lib/net472/NuGet.Versioning.dll",
+        "lib/net472/NuGet.Versioning.xml",
+        "lib/netstandard2.0/NuGet.Versioning.dll",
+        "lib/netstandard2.0/NuGet.Versioning.xml",
+        "nuget.versioning.6.14.0.nupkg.sha512",
+        "nuget.versioning.nuspec"
+      ]
+    },
     "System.Security.AccessControl/4.7.0": {
       "sha512": "JECvTt5aFF3WT3gHpfofL2MNNP6v84sxtXxpqhLBCcDRzqsPBmHhQ6shv4DwwN2tRlzsUxtb3G9M3763rbXKDg==",
       "type": "package",
@@ -522,19 +568,43 @@
         "useSharedDesignerContext.txt",
         "version.txt"
       ]
+    },
+    "Velopack/0.0.1298": {
+      "sha512": "PJ6Nm28qJ4ChsHYzgHUJ8g+DGyyHes2+bwxY709+znMhgi8fMp8M1FTF8x6pZMjnsPCWVwoMlxVEyq0NLeRZtA==",
+      "type": "package",
+      "path": "velopack/0.0.1298",
+      "files": [
+        ".nupkg.metadata",
+        ".signature.p7s",
+        "README_NUGET.md",
+        "Velopack_200.png",
+        "lib/net462/Velopack.dll",
+        "lib/net462/Velopack.xml",
+        "lib/net6.0/Velopack.dll",
+        "lib/net6.0/Velopack.xml",
+        "lib/net8.0/Velopack.dll",
+        "lib/net8.0/Velopack.xml",
+        "lib/net9.0/Velopack.dll",
+        "lib/net9.0/Velopack.xml",
+        "lib/netstandard2.0/Velopack.dll",
+        "lib/netstandard2.0/Velopack.xml",
+        "velopack.0.0.1298.nupkg.sha512",
+        "velopack.nuspec"
+      ]
     }
   },
   "projectFileDependencyGroups": {
     "net10.0-windows7.0": [
       "NAudio >= 2.2.1",
-      "Newtonsoft.Json >= 13.0.4"
+      "Newtonsoft.Json >= 13.0.4",
+      "Velopack >= 0.0.1298"
     ]
   },
   "packageFolders": {
     "C:\\Users\\admin\\.nuget\\packages\\": {}
   },
   "project": {
-    "version": "0.3.0",
+    "version": "0.5.6",
     "restore": {
       "projectUniqueName": "E:\\CSProject\\BiliNCM-Bot\\BiliNCM-Bot\\BiliNCM-Bot.csproj",
       "projectName": "BiliNCM-Bot",
@@ -580,6 +650,10 @@
           "Newtonsoft.Json": {
             "target": "Package",
             "version": "[13.0.4, )"
+          },
+          "Velopack": {
+            "target": "Package",
+            "version": "[0.0.1298, )"
           }
         },
         "imports": [

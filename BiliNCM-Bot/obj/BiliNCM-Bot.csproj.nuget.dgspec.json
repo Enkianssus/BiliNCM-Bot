@@ -5,7 +5,7 @@
   },
   "projects": {
     "E:\\CSProject\\BiliNCM-Bot\\BiliNCM-Bot\\BiliNCM-Bot.csproj": {
-      "version": "0.3.0",
+      "version": "0.5.6",
       "restore": {
         "projectUniqueName": "E:\\CSProject\\BiliNCM-Bot\\BiliNCM-Bot\\BiliNCM-Bot.csproj",
         "projectName": "BiliNCM-Bot",
@@ -51,6 +51,10 @@
             "Newtonsoft.Json": {
               "target": "Package",
               "version": "[13.0.4, )"
+            },
+            "Velopack": {
+              "target": "Package",
+              "version": "[0.0.1298, )"
             }
           },
           "imports": [
