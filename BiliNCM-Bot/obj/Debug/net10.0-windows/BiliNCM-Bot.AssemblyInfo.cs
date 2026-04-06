@@ -12,11 +12,11 @@ using System.Reflection;
 
 [assembly: System.Reflection.AssemblyCompanyAttribute("BiliNCM-Bot")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
-[assembly: System.Reflection.AssemblyFileVersionAttribute("0.5.8.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.5.8+935d70bd05f7f121db8e4223d81d1988f8873a19")]
+[assembly: System.Reflection.AssemblyFileVersionAttribute("0.5.9.0")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.5.9+23219dfbbbd1111fc1ee9838a0552d1424afdc4a")]
 [assembly: System.Reflection.AssemblyProductAttribute("BiliNCM-Bot")]
 [assembly: System.Reflection.AssemblyTitleAttribute("BiliNCM-Bot")]
-[assembly: System.Reflection.AssemblyVersionAttribute("0.5.8.0")]
+[assembly: System.Reflection.AssemblyVersionAttribute("0.5.9.0")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]
 
