@@ -98,6 +98,7 @@ namespace BiliNetEaseIntegratedApp
             
             public string AuthJson { get; set; } = "";
             public int CooldownMinutes { get; set; } = 0;
+            public int AltHoldMs { get; set; } = 0; // 新增：模拟ALT键按压的时长
             public bool ShowDebugLogs { get; set; } = false;
             public bool ShowAllDanmaku { get; set; } = false;
 
@@ -182,8 +183,6 @@ namespace BiliNetEaseIntegratedApp
 
         static List<LogEntry> _sysLogs = new List<LogEntry>();
         static readonly object _consoleLock = new object();
-
-        static DateTime _lastHeartbeatTime = DateTime.Now;
         #endregion
 
         [STAThread] 
@@ -222,17 +221,7 @@ namespace BiliNetEaseIntegratedApp
                 monitorThread.IsBackground = true;
                 monitorThread.Start();
 
-                _lastHeartbeatTime = DateTime.Now.AddSeconds(20);
-                Thread watchdogThread = new Thread(() => {
-                    while (true) {
-                        Thread.Sleep(3000);
-                        if ((DateTime.Now - _lastHeartbeatTime).TotalSeconds > 15) {
-                            Environment.Exit(0);
-                        }
-                    }
-                });
-                watchdogThread.IsBackground = true;
-                watchdogThread.Start();
+                // 已移除看门狗（Watchdog）相关机制，防止程序在未频繁收到前端心跳时自动退出
 
                 if (_config.RoomId > 0 && !string.IsNullOrEmpty(_config.BiliCookie)) {
                     WriteLog($">>> [系统] 检测到历史房间配置，自动尝试连接直播间: {_config.RoomId}", ConsoleColor.Yellow);
@@ -489,7 +478,7 @@ namespace BiliNetEaseIntegratedApp
                 }
 
                 if (urlPath == "/data") {
-                    _lastHeartbeatTime = DateTime.Now;
+                    // 已移除 _lastHeartbeatTime = DateTime.Now; 因为看门狗已删除
 
                     res.ContentType = "application/json; charset=utf-8";
                     var obj = new { 
@@ -884,6 +873,11 @@ namespace BiliNetEaseIntegratedApp
             try {
                 // 修复：千万不能给 URL 协议套用 ProcessWindowStyle.Hidden，这会导致网易云主窗口直接消失并拒绝执行播放指令！
                 Process.Start(new ProcessStartInfo { FileName = orpheusUrl, UseShellExecute = true });
+                
+                // 如果用户在前端设置了延迟时长，则在这里挂起一段时间再松开ALT
+                if (_config.AltHoldMs > 0) {
+                    Thread.Sleep(_config.AltHoldMs);
+                }
             } 
             catch { }
             finally {
