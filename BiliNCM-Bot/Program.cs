@@ -16,7 +16,6 @@ using System.Buffers.Binary;
 using Newtonsoft.Json.Linq;
 using NeteaseCloudMusicApi;
 using System.Text.Json;
-using NAudio.CoreAudioApi;
 using Velopack;
 using Velopack.Sources;
 
@@ -24,18 +23,8 @@ namespace BiliNetEaseIntegratedApp
 {
     class Program
     {
-        #region Win32 API & Constants
-        [DllImport("user32.dll")]
-        private static extern bool EnumThreadWindows(int dwThreadId, EnumThreadDelegate lpfn, IntPtr lParam);
-
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-        [DllImport("user32.dll")]
-        private static extern bool IsWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        private static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, uint dwExtraInfo);
 
         [DllImport("kernel32.dll")]
         static extern IntPtr GetConsoleWindow();
@@ -50,40 +39,12 @@ namespace BiliNetEaseIntegratedApp
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
         
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-        
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr ProcessId);
-
-        [DllImport("user32.dll")]
-        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        private delegate bool EnumThreadDelegate(IntPtr hWnd, IntPtr lParam);
-
-        private const byte VK_CONTROL = 0x11;
-        private const byte VK_MENU = 0x12; // ALT 键
-        private const byte VK_RIGHT = 0x27;
-        private const uint KEYEVENTF_KEYUP = 0x0002;
         private const int SW_HIDE = 0;
-        private const int SW_SHOW = 5;
-        
-        // 最小化窗口且不激活它 (防止遮挡游戏)
-        private const int SW_SHOWMINNOACTIVE = 7;
-
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
         private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOSIZE = 0x0001;
-        #endregion
 
-        #region 配置与数据模型
         public class PermissionConfig {
             public bool AllowManager { get; set; } = true;    
             public int MinGuardType { get; set; } = 0;        
@@ -98,18 +59,22 @@ namespace BiliNetEaseIntegratedApp
             
             public string AuthJson { get; set; } = "";
             public int CooldownMinutes { get; set; } = 0;
-            public int AltHoldMs { get; set; } = 0; // 新增：模拟ALT键按压的时长
+            public int AltHoldMs { get; set; } = 0; 
             public bool ShowDebugLogs { get; set; } = false;
             public bool ShowAllDanmaku { get; set; } = false;
+
+            public bool EnableCDP { get; set; } = true;
+            public int CdpPort { get; set; } = 9222;
 
             public bool EnableHUD { get; set; } = true; 
             public int RestoreDelayMs { get; set; } = 800; 
             public int MonitorIntervalMs { get; set; } = 300; 
             public List<string> SuperUsers { get; set; } = new List<string>(); 
-            public PermissionConfig OrderPermission { get; set; } = new PermissionConfig { MinMedalLevel = 5 };
-            public PermissionConfig SkipPermission { get; set; } = new PermissionConfig { AllowManager = true, MinMedalLevel = 5 };
-            public PermissionConfig PriorityPermission { get; set; } = new PermissionConfig { MinGuardType = 3 };
-            public PermissionConfig CancelPermission { get; set; } = new PermissionConfig { MinMedalLevel = 5 };
+            
+            public PermissionConfig OrderPermission { get; set; } = new PermissionConfig { MinMedalLevel = 0 };
+            public PermissionConfig SkipPermission { get; set; } = new PermissionConfig { AllowManager = true, MinMedalLevel = 0 };
+            public PermissionConfig PriorityPermission { get; set; } = new PermissionConfig { MinGuardType = 0 };
+            public PermissionConfig CancelPermission { get; set; } = new PermissionConfig { MinMedalLevel = 0 };
             
             public PermissionConfig ToggleAcceptPermission { get; set; } = new PermissionConfig { AllowManager = true, MinMedalLevel = 0, MinGuardType = 0 };
             public PermissionConfig ForceControlPermission { get; set; } = new PermissionConfig { AllowManager = true, MinMedalLevel = 0, MinGuardType = -1 };
@@ -141,12 +106,11 @@ namespace BiliNetEaseIntegratedApp
             public string Message { get; set; }
             public string Color { get; set; }
         }
-        #endregion
 
-        #region 全局状态 & Web API数据
         static AppConfig _config = new AppConfig();
         static CloudMusicApi _neteaseApi = new CloudMusicApi();
         static List<SongInfo> _targetQueue = new List<SongInfo>(); 
+        static HashSet<string> _withdrawnSongIds = new HashSet<string>(); // [新增] 撤回/残余歌曲黑名单
         static readonly object _queueLock = new object();
         
         static ConcurrentDictionary<string, DateTime> _userCooldowns = new ConcurrentDictionary<string, DateTime>();
@@ -161,9 +125,6 @@ namespace BiliNetEaseIntegratedApp
         static bool _acceptingRequests = true; 
         static bool _isPlayingEnabled = true;
         static bool _isPinned = true;
-
-        static IntPtr _cachedHandle = IntPtr.Zero;
-        static int[] _cachedPids = new int[0];
         
         static CancellationTokenSource _biliCts = new CancellationTokenSource();
         
@@ -183,7 +144,19 @@ namespace BiliNetEaseIntegratedApp
 
         static List<LogEntry> _sysLogs = new List<LogEntry>();
         static readonly object _consoleLock = new object();
-        #endregion
+
+        static DateTime _lastForcePlayTime = DateTime.MinValue;
+        static DateTime _lastPushToQueueTime = DateTime.MinValue; 
+        static string _lastInsertedNextSongId = null;
+        static DateTime _lastInsertTime = DateTime.MinValue;
+        
+        static volatile bool _queueDirty = false;
+
+        static void MarkQueueDirty() {
+            _queueDirty = true;
+            _lastInsertedNextSongId = null;
+            _lastInsertTime = DateTime.MinValue;
+        }
 
         [STAThread] 
         static void Main(string[] args)
@@ -216,12 +189,9 @@ namespace BiliNetEaseIntegratedApp
                 _neteaseApi.Cookies.Add(new Cookie("os", "pc", "/", ".music.163.com"));
                 _neteaseApi.Cookies.Add(new Cookie("appver", "2.10.6", "/", ".music.163.com"));
 
-                Thread monitorThread = new Thread(MonitorLoop);
-                monitorThread.Priority = ThreadPriority.Highest;
-                monitorThread.IsBackground = true;
-                monitorThread.Start();
+                RestartNCMWithDebugPort();
 
-                // 已移除看门狗（Watchdog）相关机制，防止程序在未频繁收到前端心跳时自动退出
+                _ = Task.Run(MonitorLoopAsync);
 
                 if (_config.RoomId > 0 && !string.IsNullOrEmpty(_config.BiliCookie)) {
                     WriteLog($">>> [系统] 检测到历史房间配置，自动尝试连接直播间: {_config.RoomId}", ConsoleColor.Yellow);
@@ -249,7 +219,6 @@ namespace BiliNetEaseIntegratedApp
             }
         }
 
-        #region HTTP WebServer & Admin API 模块
         static void LocateWebRoot() {
             string currentDir = AppDomain.CurrentDomain.BaseDirectory;
             string[] possiblePaths = { Path.Combine(currentDir, "public"), Path.Combine(currentDir, "dist"), Path.Combine(currentDir, "bili-overlay", "dist"), @"E:\CSProject\BiliNCM-Bot\bili-overlay\dist" };
@@ -272,6 +241,43 @@ namespace BiliNetEaseIntegratedApp
 
             try {
                 string urlPath = req.Url.AbsolutePath;
+
+                if (urlPath == "/api/debug/insert_next" && req.HttpMethod == "POST") {
+                    using var reader = new StreamReader(req.InputStream, req.ContentEncoding ?? Encoding.UTF8);
+                    var doc = JsonDocument.Parse(reader.ReadToEnd());
+                    string keyword = doc.RootElement.GetProperty("keyword").GetString();
+                    bool success = false;
+                    try {
+                        var resApi = await _neteaseApi.RequestAsync(CloudMusicApiProviders.Search, new Dictionary<string, object> { { "keywords", keyword }, { "limit", 1 } });
+                        var songs = resApi["result"]?["songs"] as JArray;
+                        if (songs != null && songs.Count > 0) {
+                            string songId = songs[0]["id"]?.ToString();
+                            await InsertNextSongViaCDP(songId); 
+                            WriteLog($"[Debug] 成功搜索并预加载: {songs[0]["name"]} (ID:{songId})", ConsoleColor.Magenta);
+                            success = true;
+                        } else {
+                            WriteLog($"[Debug] 测试失败: 未找到对应歌曲", ConsoleColor.Red);
+                        }
+                    } catch (Exception ex) { WriteLog($"[Debug] 异常: {ex.Message}", ConsoleColor.Red); }
+                    
+                    res.ContentType = "application/json; charset=utf-8";
+                    byte[] ebytes = Encoding.UTF8.GetBytes($"{{\"success\":{success.ToString().ToLower()}}}");
+                    res.OutputStream.Write(ebytes, 0, ebytes.Length);
+                    return;
+                }
+
+                if (urlPath == "/api/debug/play_next" && req.HttpMethod == "POST") {
+                    await TrySkipSongAsync();
+                    res.ContentType = "application/json; charset=utf-8";
+                    byte[] ebytes = Encoding.UTF8.GetBytes("{\"success\":true}");
+                    res.OutputStream.Write(ebytes, 0, ebytes.Length);
+                    return;
+                }
+
+                if (urlPath == "/api/sys/restart_ncm" && req.HttpMethod == "POST") {
+                    RestartNCMWithDebugPort();
+                    res.ContentType = "application/json; charset=utf-8"; byte[] ebytes = Encoding.UTF8.GetBytes("{\"success\":true}"); res.OutputStream.Write(ebytes, 0, ebytes.Length); return;
+                }
 
                 if (urlPath == "/api/sys/topmost" && req.HttpMethod == "POST") {
                     _isPinned = !_isPinned;
@@ -307,7 +313,8 @@ namespace BiliNetEaseIntegratedApp
                 if (urlPath == "/api/state/toggle_play" && req.HttpMethod == "POST") {
                     _isPlayingEnabled = !_isPlayingEnabled;
                     if (!_isPlayingEnabled && _currentPlayingSong != null) {
-                        lock (_queueLock) { _targetQueue.Insert(0, _currentPlayingSong.Value); _currentPlayingSong = null; } WriteLog(">>> [系统] 暂停播放，当前歌曲已自动退回队列顶部", ConsoleColor.Yellow); SimulateNextTrackShortcut();
+                        lock (_queueLock) { _targetQueue.Insert(0, _currentPlayingSong.Value); _currentPlayingSong = null; } WriteLog(">>> [系统] 暂停播放，当前歌曲已自动退回队列顶部", ConsoleColor.Yellow); 
+                        _ = TrySkipSongAsync();
                     }
                     SyncHUD(); WriteLog($">>> [系统] 自动播放队列功能目前已 {(_isPlayingEnabled ? "开启" : "暂停")}", _isPlayingEnabled ? ConsoleColor.Green : ConsoleColor.Red);
                     res.ContentType = "application/json; charset=utf-8"; byte[] ebytes = Encoding.UTF8.GetBytes("{\"success\":true}"); res.OutputStream.Write(ebytes, 0, ebytes.Length); return;
@@ -330,28 +337,36 @@ namespace BiliNetEaseIntegratedApp
                         } else if (action == "push_current_to_queue") {
                             if (_currentPlayingSong.HasValue) {
                                 var target = _currentPlayingSong.Value;
+                                bool wasEmpty = (_targetQueue.Count == 0); 
                                 _targetQueue.Add(target);
                                 _currentPlayingSong = null; 
+                                _lastPushToQueueTime = DateTime.Now; 
                                 WriteLog($">>> [系统] 播放被强行中断，已退回队尾: {target.SongName}", ConsoleColor.Yellow);
                                 
-                                if (_targetQueue.Count == 1) {
-                                    _isPlayingEnabled = false;
-                                    WriteLog(">>> [系统] 队列仅剩一首并被拖回，已自动暂停播放", ConsoleColor.Yellow);
+                                _ = TrySkipSongAsync();
+
+                                if (wasEmpty && _isPlayingEnabled) {
+                                    _ = Task.Run(async () => {
+                                        await Task.Delay(1500); 
+                                        await InsertNextSongViaCDP(target.Id);
+                                    });
                                 }
-                                SimulateNextTrackShortcut();
                             }
                         } else if (action == "skip_current") {
                             if (_currentPlayingSong.HasValue) {
                                 WriteLog($">>> [系统] 强行移除了正在播放的歌曲", ConsoleColor.Yellow);
                                 _currentPlayingSong = null; 
-                                SimulateNextTrackShortcut();
+                                _ = TrySkipSongAsync();
                             }
                         } else {
                             if (doc.RootElement.TryGetProperty("index", out var idxProp)) {
                                 int index = idxProp.GetInt32();
                                 if (index >= 0 && index < _targetQueue.Count) {
                                     if (action == "delete") {
+                                        var target = _targetQueue[index];
                                         _targetQueue.RemoveAt(index);
+                                        _withdrawnSongIds.Add(target.Id); // [新增] 加入撤回黑名单
+                                        _ = RemoveSongFromPlaylistViaCDP(target.Id);
                                     } else if (action == "top") {
                                         var item = _targetQueue[index];
                                         _targetQueue.RemoveAt(index);
@@ -365,15 +380,13 @@ namespace BiliNetEaseIntegratedApp
                                         }
 
                                         _isPlayingEnabled = true;
-                                        _currentPlayingSong = target; 
-                                        WriteLog($">>> [系统] 强行立刻插播新歌: {target.SongName}", ConsoleColor.Yellow);
-                                        SyncHUD($"[强制播放] {target.SongName}");
-                                        Task.Run(() => ExecuteIntercept(_cachedPids, _cachedHandle, _lastTrackTitle ?? "", target));
+                                        Task.Run(() => ForcePlaySongAsync(target));
                                     }
                                 }
                             }
                         }
                     }
+                    MarkQueueDirty();
                     SyncHUD();
                     res.ContentType = "application/json; charset=utf-8";
                     byte[] okBytes = Encoding.UTF8.GetBytes("{\"success\":true}");
@@ -478,8 +491,6 @@ namespace BiliNetEaseIntegratedApp
                 }
 
                 if (urlPath == "/data") {
-                    // 已移除 _lastHeartbeatTime = DateTime.Now; 因为看门狗已删除
-
                     res.ContentType = "application/json; charset=utf-8";
                     var obj = new { 
                         status = OverlayState.Status, 
@@ -523,9 +534,178 @@ namespace BiliNetEaseIntegratedApp
                 if (_sysLogs.Count > 100) _sysLogs.RemoveAt(0); 
             }
         }
-        #endregion
 
-        #region Bilibili 扫码、房间连接逻辑
+        static void RestartNCMWithDebugPort() {
+            try {
+                var procs = Process.GetProcessesByName("cloudmusic");
+                string exePath = "";
+                
+                if (procs.Length > 0) {
+                    try { exePath = procs[0].MainModule.FileName; } catch { }
+                    foreach(var p in procs) { try { p.Kill(); } catch { } }
+                    Thread.Sleep(1000); 
+                }
+                
+                if (string.IsNullOrEmpty(exePath)) {
+                    string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                    string defaultPath = Path.Combine(localAppData, "Netease", "CloudMusic", "cloudmusic.exe");
+                    if (File.Exists(defaultPath)) exePath = defaultPath;
+                    else {
+                        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                        string pfPath = Path.Combine(programFiles, "Netease", "CloudMusic", "cloudmusic.exe");
+                        if (File.Exists(pfPath)) exePath = pfPath;
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(exePath)) {
+                    Process.Start(exePath, $"--remote-debugging-port={_config.CdpPort}");
+                    WriteLog($">>> [CDP] 已自动寻找并带调试端口({_config.CdpPort})重启网易云音乐！", ConsoleColor.Green);
+                    StartCDPRadar();
+                } else {
+                    WriteLog(">>> [错误] 找不到网易云安装路径，请先手动正常运行一次网易云！", ConsoleColor.Red);
+                }
+            } catch(Exception ex) {
+                WriteLog($"[重启网易云失败] {ex.Message}", ConsoleColor.Red);
+            }
+        }
+
+        static async Task<string> SendCDPCommandAndGetResultAsync(string script)
+        {
+            if (!_config.EnableCDP) return null;
+            
+            try {
+                using var httpClient = new HttpClient();
+                httpClient.Timeout = TimeSpan.FromSeconds(2);
+                var jsonStr = await httpClient.GetStringAsync($"http://127.0.0.1:{_config.CdpPort}/json");
+                var targets = JsonDocument.Parse(jsonStr).RootElement;
+                
+                string wsUrl = "";
+                foreach (var t in targets.EnumerateArray()) {
+                    if (t.GetProperty("type").GetString() == "page" && t.GetProperty("url").GetString().Contains("orpheus")) {
+                        wsUrl = t.GetProperty("webSocketDebuggerUrl").GetString();
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(wsUrl)) {
+                     foreach (var t in targets.EnumerateArray()) {
+                        if (t.GetProperty("type").GetString() == "page") {
+                            wsUrl = t.GetProperty("webSocketDebuggerUrl").GetString();
+                            break;
+                        }
+                    }
+                }
+
+                if (string.IsNullOrEmpty(wsUrl)) return null;
+
+                using var ws = new ClientWebSocket();
+                await ws.ConnectAsync(new Uri(wsUrl), CancellationToken.None);
+                
+                var payload = new {
+                    id = 1,
+                    method = "Runtime.evaluate",
+                    @params = new Dictionary<string, object> {
+                        { "expression", script },
+                        { "returnByValue", true },
+                        { "awaitPromise", true }
+                    }
+                };
+                
+                string reqJson = JsonSerializer.Serialize(payload);
+                var bytes = Encoding.UTF8.GetBytes(reqJson);
+                await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                
+                var buffer = new byte[8192];
+                using var ms = new MemoryStream();
+                WebSocketReceiveResult wsRes;
+                do {
+                    wsRes = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                    ms.Write(buffer, 0, wsRes.Count);
+                } while (!wsRes.EndOfMessage);
+                
+                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "Done", CancellationToken.None);
+                
+                string resJson = Encoding.UTF8.GetString(ms.ToArray());
+                var doc = JsonDocument.Parse(resJson);
+                
+                if (doc.RootElement.TryGetProperty("result", out var outerRes) && 
+                    outerRes.TryGetProperty("result", out var innerRes) && 
+                    innerRes.TryGetProperty("value", out var val)) 
+                {
+                    if (val.ValueKind == JsonValueKind.String) return val.GetString();
+                    return val.GetRawText();
+                }
+                
+                return "true";
+            } catch {
+                return null;
+            }
+        }
+
+        static string GetFiberStoreExtractJs() {
+            return @"
+                function _ensureStore() {
+                    if (window._reduxStore) return true;
+                    const root = window._fiberRoot || (document.querySelector('#root') && document.querySelector('#root')._reactRootContainer && document.querySelector('#root')._reactRootContainer._internalRoot);
+                    if (!root) return false;
+                    let queue = [root.current || root];
+                    while (queue.length > 0) {
+                        let node = queue.shift();
+                        if (!node) continue;
+                        if (node.memoizedProps && node.memoizedProps.store) { window._reduxStore = node.memoizedProps.store; return true; }
+                        if (node.stateNode && node.stateNode.store) { window._reduxStore = node.stateNode.store; return true; }
+                        let child = node.child;
+                        while (child) { queue.push(child); child = child.sibling; }
+                    }
+                    return false;
+                }
+            ";
+        }
+
+        static async Task<bool> InsertNextSongViaCDP(string songId) {
+            string js = GetFiberStoreExtractJs() + $@"
+                if (_ensureStore()) {{
+                    window._reduxStore.dispatch({{
+                        type: 'async:action/doAction',
+                        payload: {{
+                            actionId: 'addToPlayList',
+                            data: {{
+                                resource: {{ id: String({songId}), duration: 0 }},
+                                resourceType: 'track',
+                                eventType: 'click'
+                            }}
+                        }}
+                    }});
+                    'ok';
+                }} else {{
+                    'no_store';
+                }}
+            ";
+            var result = await SendCDPCommandAndGetResultAsync(js);
+            if (result == "ok") {
+                if (_config.ShowDebugLogs) WriteLog($"[CDP] addToPlayList 成功: songId={songId}", ConsoleColor.DarkGray);
+                return true;
+            } else {
+                WriteLog($"[CDP] addToPlayList 失败: songId={songId}, result={result}", ConsoleColor.Red);
+                return false;
+            }
+        }
+
+        static async Task RemoveSongFromPlaylistViaCDP(string songId) {
+            string js = GetFiberStoreExtractJs() + $@"
+                if (_ensureStore()) {{
+                    window._reduxStore.dispatch({{
+                        type: 'async:action/doAction',
+                        payload: {{ actionId: 'removeFromPlayingList', data: {{ id: String({songId}) }} }}
+                    }});
+                    window._reduxStore.dispatch({{
+                        type: 'async:action/doAction',
+                        payload: {{ actionId: 'removeFromPlayList', data: {{ id: String({songId}) }} }}
+                    }});
+                }}
+            ";
+            await SendCDPCommandAndGetResultAsync(js);
+        }
+
         static async Task BiliQrLoginAsync()
         {
             _isQrLoggingIn = true; _qrCodeBase64 = ""; _qrLoginStatus = "正在向 B站请求二维码...";
@@ -588,7 +768,7 @@ namespace BiliNetEaseIntegratedApp
                 _config.BiliUid = uid;
                 SaveConfig();
                 
-                _qrLoginStatus = "登录完成，请前往“运行状态”连接直播间！";
+                _qrLoginStatus = "登录完成，请前连接直播间！";
                 WriteLog($">>> [登录] 登录成功，UID: {uid}", ConsoleColor.Green);
 
             } catch (Exception ex) {
@@ -657,9 +837,7 @@ namespace BiliNetEaseIntegratedApp
                 return false;
             }
         }
-        #endregion
-        
-        #region 底层监控、音量控制与核心拦截
+
         static bool LoadConfig() {
             try {
                 string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "config.json");
@@ -706,7 +884,7 @@ namespace BiliNetEaseIntegratedApp
 
         static async Task TryRequestSong(UserInfo user, string keyword, string mode = "normal") {
             if (mode == "normal" && !HasPermission(user, _config.OrderPermission)) {
-                WriteLog($"   |_ [拒绝] {user.Name} 权限不足", ConsoleColor.DarkGray);
+                WriteLog($"   |_ [拒绝] {user.Name} 弹幕点歌失败: 权限不足", ConsoleColor.DarkGray);
                 return;
             }
             if (!_config.SuperUsers.Contains(user.Name) && _userCooldowns.TryGetValue(user.Uid, out DateTime last) && (DateTime.Now - last).TotalMinutes < _config.CooldownMinutes) {
@@ -730,7 +908,12 @@ namespace BiliNetEaseIntegratedApp
                     OrderedBy = user.Name, OrderedByUid = user.Uid, OrderedByAvatar = avatar 
                 };
                 
+                bool shouldInsertToNCM = false;
+                string insertSongId = null;
+
                 lock (_queueLock) { 
+                    _withdrawnSongIds.Remove(newSong.Id); // [新增] 若再次点歌，将其移出黑名单，让其恢复正常可播放状态
+                    
                     if (mode == "play_now_drop" || mode == "play_now_keep") {
                         if (mode == "play_now_keep" && _currentPlayingSong.HasValue) {
                             _targetQueue.Insert(0, _currentPlayingSong.Value);
@@ -740,20 +923,34 @@ namespace BiliNetEaseIntegratedApp
                         }
 
                         _isPlayingEnabled = true;
-                        _currentPlayingSong = newSong; 
-                        WriteLog($"[指令] {user.Name} 强行插播了新点歌曲: {newSong.SongName}", ConsoleColor.Yellow);
-                        SyncHUD($"[强制播放] {newSong.SongName}");
-                        Task.Run(() => ExecuteIntercept(_cachedPids, _cachedHandle, _lastTrackTitle ?? "", newSong));
+                        Task.Run(() => ForcePlaySongAsync(newSong));
                     } else if (mode == "top") {
                         _targetQueue.Insert(0, newSong);
                         WriteLog($"[指令] {user.Name} 置顶点歌了: {newSong.SongName}", ConsoleColor.Green);
                         SyncHUD($"[置顶] {newSong.SongName}");
+                        if (_isPlayingEnabled) {
+                            shouldInsertToNCM = true;
+                            insertSongId = newSong.Id;
+                        }
+                        MarkQueueDirty();
                     } else {
                         _targetQueue.Add(newSong);
                         WriteLog($"   |_ [入队] {newSong.FullTitle} (by {user.Name})", ConsoleColor.Green);
                         SyncHUD($"[入队] {newSong.SongName} ({user.Name})");
+                        
+                        if (_targetQueue.Count == 1 && _isPlayingEnabled) {
+                            shouldInsertToNCM = true;
+                            insertSongId = newSong.Id;
+                        }
+                        MarkQueueDirty();
                     }
                 }
+                
+                if (shouldInsertToNCM && insertSongId != null) {
+                    WriteLog($"[CDP] 点歌入队后立即 addToPlayList: {newSong.SongName} ({insertSongId})", ConsoleColor.Cyan);
+                    await InsertNextSongViaCDP(insertSongId);
+                }
+                
                 _userCooldowns[user.Uid] = DateTime.Now;
             } catch { }
         }
@@ -763,183 +960,227 @@ namespace BiliNetEaseIntegratedApp
             if (!canSkip && _currentPlayingSong.HasValue) canSkip = (_currentPlayingSong.Value.OrderedByUid == user.Uid);
             if (canSkip) { 
                 WriteLog($"   |_ [指令] {user.Name} 发起了切歌", ConsoleColor.Yellow);
-                SyncHUD($"[切歌] 由 {user.Name} 发起"); SimulateNextTrackShortcut(); 
+                SyncHUD($"[切歌] 由 {user.Name} 发起"); 
+                _ = TrySkipSongAsync();
             }
         }
 
-        static void SimulateNextTrackShortcut() {
-            keybd_event(VK_CONTROL, 0, 0, 0); keybd_event(VK_MENU, 0, 0, 0); keybd_event(VK_RIGHT, 0, 0, 0);
-            keybd_event(VK_RIGHT, 0, KEYEVENTF_KEYUP, 0); keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0); keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+        static async Task TrySkipSongAsync() {
+            if (_config.EnableCDP) {
+                string skipJs = GetFiberStoreExtractJs() + @"
+                    if (_ensureStore()) {
+                        window._reduxStore.dispatch({
+                            type: 'async:action/doAction',
+                            payload: { actionId: 'playNext', data: { eventType: 'click' } }
+                        });
+                    }
+                ";
+                var result = await SendCDPCommandAndGetResultAsync(skipJs);
+                if (result != null) {
+                    WriteLog("[CDP] 注入切歌指令成功！", ConsoleColor.Cyan);
+                }
+            }
         }
 
-        static void MonitorLoop() {
-            Stopwatch refreshSw = Stopwatch.StartNew();
+        static async Task MonitorLoopAsync() {
             while (_isMonitoring) {
-                if (_isIntercepting) { Thread.Sleep(100); continue; }
+                if (_isIntercepting) { await Task.Delay(100); continue; }
                 
                 try {
-                    if (!IsWindow(_cachedHandle) || refreshSw.ElapsedMilliseconds > 2000) {
-                        var procs = Process.GetProcessesByName("cloudmusic").Concat(Process.GetProcessesByName("NetEase Cloud Music")).ToArray();
-                        if (procs.Length == 0) { _cachedHandle = IntPtr.Zero; Thread.Sleep(1000); continue; }
-                        _cachedPids = procs.Select(p => p.Id).Distinct().ToArray();
-                        foreach (var p in procs) {
-                            IntPtr h = IntPtr.Zero;
-                            foreach (ProcessThread t in p.Threads) {
-                                EnumThreadWindows(t.Id, (hw, lp) => {
-                                    StringBuilder sb = new StringBuilder(256); GetWindowText(hw, sb, 256);
-                                    if (!string.IsNullOrEmpty(sb.ToString()) && !sb.ToString().Contains("桌面歌词")) {
-                                        if (sb.ToString().Contains(" - ")) { h = hw; return false; }
-                                        if (sb.ToString().Contains("网易云") && h == IntPtr.Zero) h = hw;
+                    if (_config.EnableCDP) {
+                        string js = GetFiberStoreExtractJs() + @"
+                            function getPlaybackInfo() {
+                                if (!_ensureStore()) return null;
+                                try {
+                                    const state = window._reduxStore.getState();
+                                    const playingState = state.playing || {};
+                                    const playingList = state.playingList?.curPlayingList || [];
+                                    const currentId = playingState.resourceTrackId || playingState.onlineResourceId;
+                                    const currentIndex = playingList.findIndex(item => String(item.id) === String(currentId));
+                                    
+                                    return JSON.stringify({
+                                        currentId: currentId ? String(currentId) : null,
+                                        nextId: (currentIndex !== -1 && playingList[currentIndex + 1]) ? String(playingList[currentIndex + 1].id) : null
+                                    });
+                                } catch (e) { return null; }
+                            }
+                            getPlaybackInfo();
+                        ";
+                        
+                        var infoStr = await SendCDPCommandAndGetResultAsync(js);
+                        if (!string.IsNullOrEmpty(infoStr) && infoStr != "null") {
+                            var doc = JsonDocument.Parse(infoStr).RootElement;
+                            string currentId = doc.TryGetProperty("currentId", out var c) && c.ValueKind != JsonValueKind.Null ? c.GetString() : null;
+                            string nextId = doc.TryGetProperty("nextId", out var n) && n.ValueKind != JsonValueKind.Null ? n.GetString() : null;
+
+                            if (currentId == null) { await Task.Delay(_config.MonitorIntervalMs); continue; }
+
+                            bool stateChanged = false;
+                            SongInfo? songToForcePlay = null;
+                            string songToInsertAsNext = null;
+
+                            lock (_queueLock) {
+                                bool ncmTrackChanged = (currentId != _lastTrackTitle);
+                                _lastTrackTitle = currentId;
+                                
+                                // MonitorLoop 现在作为备用方案，防雷达漏掉消息
+                                if (ncmTrackChanged) {
+                                    if (_withdrawnSongIds.Contains(currentId)) {
+                                        WriteLog($"[防残歌系统/监控] 发现网易云播放了已被撤回/移除的歌曲，正在自动跳过: {currentId}", ConsoleColor.Yellow);
+                                        _withdrawnSongIds.Remove(currentId);
+                                        _ = TrySkipSongAsync();
+                                    } else {
+                                        if (_config.ShowDebugLogs) WriteLog($"[监控] 网易云切歌信号: newId={currentId}, 当前点播={_currentPlayingSong?.Id ?? "无"}, 队首={(_targetQueue.Count > 0 ? _targetQueue[0].Id : "空")}", ConsoleColor.DarkGray);
+                                        
+                                        if (_currentPlayingSong.HasValue && currentId == _currentPlayingSong.Value.Id) {
+                                            // 正常
+                                        }
+                                        else if (_currentPlayingSong.HasValue && currentId != _currentPlayingSong.Value.Id) {
+                                            if (_isPlayingEnabled && _targetQueue.Count > 0 && currentId == _targetQueue[0].Id) {
+                                                WriteLog($"[监控] 自然衔接成功: {_targetQueue[0].SongName}", ConsoleColor.Green);
+                                                _currentPlayingSong = _targetQueue[0];
+                                                _targetQueue.RemoveAt(0);
+                                                stateChanged = true;
+                                            }
+                                            else if (_isPlayingEnabled && _targetQueue.Count > 0) {
+                                                if ((DateTime.Now - _lastForcePlayTime).TotalSeconds > 2.5) {
+                                                    WriteLog($"[监控] 播完后切偏！期望={_targetQueue[0].SongName}({_targetQueue[0].Id})，实际={currentId}，强制纠正", ConsoleColor.Yellow);
+                                                    songToForcePlay = _targetQueue[0];
+                                                    _targetQueue.RemoveAt(0);
+                                                }
+                                            }
+                                            else {
+                                                WriteLog($"[监控] 点播列表已播完，清除当前播放状态", ConsoleColor.DarkGray);
+                                                _currentPlayingSong = null;
+                                                stateChanged = true;
+                                            }
+                                        }
+                                        else if (!_currentPlayingSong.HasValue && _isPlayingEnabled && _targetQueue.Count > 0) {
+                                            if (currentId == _targetQueue[0].Id) {
+                                                WriteLog($"[监控] 检测到开始播放队首: {_targetQueue[0].SongName}", ConsoleColor.Green);
+                                                _currentPlayingSong = _targetQueue[0];
+                                                _targetQueue.RemoveAt(0);
+                                                stateChanged = true;
+                                            }
+                                        }
                                     }
-                                    return true;
-                                }, IntPtr.Zero);
-                                if (h != IntPtr.Zero) break;
-                            }
-                            if (h != IntPtr.Zero) { _cachedHandle = h; break; }
-                        }
-                        refreshSw.Restart();
-                    }
-                    if (_cachedHandle == IntPtr.Zero) { Thread.Sleep(200); continue; }
+                                }
+                                
+                                if (!ncmTrackChanged && _currentPlayingSong.HasValue 
+                                    && currentId != _currentPlayingSong.Value.Id
+                                    && _isPlayingEnabled) {
+                                    if ((DateTime.Now - _lastForcePlayTime).TotalSeconds > 5) {
+                                        WriteLog($"[监控] 播放状态持续不一致：期望={_currentPlayingSong.Value.SongName}({_currentPlayingSong.Value.Id})，实际={currentId}，重新强制播放", ConsoleColor.Yellow);
+                                        var retryTarget = _currentPlayingSong.Value;
+                                        _currentPlayingSong = null;
+                                        songToForcePlay = retryTarget;
+                                    }
+                                }
 
-                    StringBuilder sb = new StringBuilder(256); GetWindowText(_cachedHandle, sb, 256); string title = sb.ToString();
-                    if (string.IsNullOrEmpty(title) || title == "网易云音乐" || title == "NetEase Cloud Music") { Thread.Sleep(2); continue; }
-
-                    if (_lastTrackTitle == null) { _lastTrackTitle = title; continue; }
-                    if (title != _lastTrackTitle) {
-                        SongInfo? target = null; bool cleared = false;
-                        lock (_queueLock) {
-                            if (_isPlayingEnabled && _targetQueue.Count > 0) {
-                                if (_expectedSong.HasValue && IsMatch(title, _expectedSong.Value)) { _expectedSong = null; _lastTrackTitle = title; continue; }
-                                if (IsMatch(title, _targetQueue[0])) { _currentPlayingSong = _targetQueue[0]; _targetQueue.RemoveAt(0); _lastTrackTitle = title; SyncHUD($"[播放] {_currentPlayingSong.Value.SongName}"); continue; }
-                                target = _targetQueue[0]; _targetQueue.RemoveAt(0);
-                            } else {
-                                if (_currentPlayingSong.HasValue && !IsMatch(title, _currentPlayingSong.Value)) { _currentPlayingSong = null; cleared = true; }
-                            }
-                        }
-                        if (target.HasValue) ExecuteIntercept(_cachedPids, _cachedHandle, title, target.Value); else if (cleared) SyncHUD("准备就绪");
-                        _lastTrackTitle = title;
-                    }
-                } catch { }
-                Thread.Sleep(_config.MonitorIntervalMs);
-            }
-        }
-
-        static bool IsMatch(string title, SongInfo song) {
-            string low = title.ToLower(); return low.Contains(song.SongName.ToLower()) && song.ArtistName.Split('/').Any(a => low.Contains(a.Trim().ToLower()));
-        }
-
-        static void SetProcessMuteGroup(int[] pids, bool mute, string offendingTitle) {
-            try {
-                MMDeviceEnumerator devEnum = new MMDeviceEnumerator();
-                var devices = devEnum.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active);
-                HashSet<uint> pidSet = new HashSet<uint>(pids.Select(p => (uint)p));
-                foreach (var device in devices) {
-                    var sessions = device.AudioSessionManager.Sessions;
-                    for (int i = 0; i < sessions.Count; i++) {
-                        var s = sessions[i];
-                        if ((s.GetProcessID != 0 && pidSet.Contains(s.GetProcessID)) || (s.DisplayName != null && (s.DisplayName.Contains("网易云") || s.DisplayName.Contains("netease")))) {
-                            if (mute) { 
-                                s.SimpleAudioVolume.Mute = true; 
-                                s.SimpleAudioVolume.Volume = 0.0f; 
-                            } else { 
-                                s.SimpleAudioVolume.Mute = false; 
-                                for (float v = 0.2f; v <= 1.0f; v += 0.2f) { 
-                                    s.SimpleAudioVolume.Volume = v; 
-                                    Thread.Sleep(20); 
+                                if (_isPlayingEnabled && _targetQueue.Count > 0 && songToForcePlay == null) {
+                                    var expectedNext = _targetQueue[0];
+                                    bool needInsert = false;
+                                    
+                                    if (_queueDirty) {
+                                        needInsert = true;
+                                        _queueDirty = false;
+                                        if (_config.ShowDebugLogs) WriteLog($"[监控] 队列脏标记触发，重新同步下一首: {expectedNext.SongName}", ConsoleColor.DarkGray);
+                                    }
+                                    else if (nextId != expectedNext.Id) {
+                                        if (_lastInsertedNextSongId != expectedNext.Id || (DateTime.Now - _lastInsertTime).TotalSeconds > 3) {
+                                            needInsert = true;
+                                            if (_config.ShowDebugLogs) WriteLog($"[监控] 预加载下一首: {expectedNext.SongName}({expectedNext.Id}), NCM下一首={nextId}", ConsoleColor.DarkGray);
+                                        }
+                                    } else {
+                                        _lastInsertedNextSongId = expectedNext.Id;
+                                    }
+                                    
+                                    if (needInsert) {
+                                        songToInsertAsNext = expectedNext.Id;
+                                        _lastInsertedNextSongId = expectedNext.Id;
+                                        _lastInsertTime = DateTime.Now;
+                                    }
+                                } else if (_queueDirty) {
+                                    _queueDirty = false; 
                                 }
                             }
+
+                            if (stateChanged) {
+                                SyncHUD(_currentPlayingSong.HasValue ? $"[播放] {_currentPlayingSong.Value.SongName}" : "准备就绪");
+                            }
+
+                            if (songToForcePlay.HasValue) {
+                                _lastForcePlayTime = DateTime.Now;
+                                _ = Task.Run(() => ForcePlaySongAsync(songToForcePlay.Value));
+                            }
+
+                            if (songToInsertAsNext != null) {
+                                await InsertNextSongViaCDP(songToInsertAsNext);
+                            }
                         }
                     }
+                } catch (Exception ex) {
+                    if (_config.ShowDebugLogs) WriteLog($"[监控异常] {ex.Message}", ConsoleColor.Red);
                 }
-            } catch { }
+                
+                await Task.Delay(_config.MonitorIntervalMs);
+            }
         }
 
-        // ---------- 这里是处理抢夺焦点的核心修改点 ----------
-        static void ExecuteIntercept(int[] pids, IntPtr handle, string offendingTitle, SongInfo target) {
-            _isIntercepting = true; _expectedSong = target; _currentPlayingSong = target;
-            SyncHUD($"[拦截] 正在跳转: {target.SongName}");
-            WriteLog($"[拦截] 切歌音量压制 -> 播放: {target.FullTitle}", ConsoleColor.Magenta);
+        static async Task ForcePlaySongAsync(SongInfo target) {
+            _isIntercepting = true; 
+            _expectedSong = target; 
             
-            SetProcessMuteGroup(pids, true, offendingTitle);
+            lock (_queueLock) {
+                _currentPlayingSong = target;
+                _lastTrackTitle = target.Id; 
+            }
             
-            // 1. 记录切歌前，当前系统处于最前台的窗口（也就是你正在玩的游戏窗口）
-            IntPtr prevForegroundWindow = GetForegroundWindow();
-
-            string orpheusUrl = "orpheus://" + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{{\"type\":\"song\",\"id\":\"{target.Id}\",\"cmd\":\"play\"}}"));
-
-            // 【核心黑科技 1】利用 Windows 系统的“焦点防抢夺机制 (Focus Stealing Prevention)”
-            // 模拟按下 ALT 键，让系统认为用户正在交互，此时任何后台程序试图抢夺焦点都会被系统直接拦截！（变成任务栏闪烁）
-            keybd_event(VK_MENU, 0, 0, 0);
-            try {
-                // 修复：千万不能给 URL 协议套用 ProcessWindowStyle.Hidden，这会导致网易云主窗口直接消失并拒绝执行播放指令！
-                Process.Start(new ProcessStartInfo { FileName = orpheusUrl, UseShellExecute = true });
+            SyncHUD($"[强制播放] {target.SongName}");
+            WriteLog($"[插播] 正在执行强制播放: {target.FullTitle}", ConsoleColor.Magenta);
+            
+            if (_config.EnableCDP) {
+                string jsPlayCmd = GetFiberStoreExtractJs() + $@"
+                    if (_ensureStore()) {{
+                        window._reduxStore.dispatch({{
+                            type: 'async:action/doAction',
+                            payload: {{
+                                actionId: 'play',
+                                data: {{
+                                    resource: {{ id: String({target.Id}) }},
+                                    resourceType: 'track',
+                                    eventType: 'dblclick'
+                                }}
+                            }}
+                        }});
+                    }}
+                ";
+                var cdpSuccess = await SendCDPCommandAndGetResultAsync(jsPlayCmd);
+                if (cdpSuccess != null) WriteLog($"[CDP] 强行插播 JS 注入成功！({target.Id})", ConsoleColor.Cyan);
                 
-                // 如果用户在前端设置了延迟时长，则在这里挂起一段时间再松开ALT
-                if (_config.AltHoldMs > 0) {
-                    Thread.Sleep(_config.AltHoldMs);
+                await Task.Delay(1500);
+
+                string nextIdToInsert = null;
+                lock (_queueLock) {
+                    if (_isPlayingEnabled && _targetQueue.Count > 0) {
+                        nextIdToInsert = _targetQueue[0].Id;
+                        _lastInsertedNextSongId = nextIdToInsert;
+                        _lastInsertTime = DateTime.Now;
+                    }
+                }
+                
+                if (nextIdToInsert != null) {
+                    WriteLog($"[CDP] 强制播放后修正，预先添加下一首排队歌曲 ({nextIdToInsert})", ConsoleColor.DarkGray);
+                    await InsertNextSongViaCDP(nextIdToInsert);
                 }
             } 
-            catch { }
-            finally {
-                // 确保瞬间释放 ALT 键，防止卡按键
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            else {
+                WriteLog($"[系统] CDP 调试未开启，无法强行切歌，请检查配置！", ConsoleColor.Red);
             }
             
-            // 【核心黑科技 2】护航线程：利用“线程输入欺骗”强行夺取焦点分配权作为双重保险
-            Task.Run(() => {
-                uint myThreadId = GetCurrentThreadId();
-                uint targetThreadId = prevForegroundWindow != IntPtr.Zero ? GetWindowThreadProcessId(prevForegroundWindow, IntPtr.Zero) : 0;
-
-                for (int i = 0; i < 40; i++) {
-                    Thread.Sleep(50);
-                    
-                    // 修复：去掉了强行最小化网易云的代码，防止破坏网易云的内部接收状态。
-
-                    if (prevForegroundWindow != IntPtr.Zero) {
-                        IntPtr currentFg = GetForegroundWindow();
-                        // 如果发现游戏焦点还是掉落了
-                        if (currentFg != prevForegroundWindow && currentFg != IntPtr.Zero) {
-                            
-                            uint fgThreadId = 0;
-                            if (currentFg != IntPtr.Zero) fgThreadId = GetWindowThreadProcessId(currentFg, IntPtr.Zero);
-                            
-                            bool attachedFg = false;
-                            bool attachedTarget = false;
-
-                            // 将后台程序的线程与当前前台窗口、目标游戏窗口的线程“捆绑”在一起
-                            // 这样 Windows 就会误以为是游戏自己或者前台程序在请求焦点切换，从而允许操作！
-                            if (fgThreadId != 0 && fgThreadId != myThreadId) {
-                                attachedFg = AttachThreadInput(myThreadId, fgThreadId, true);
-                            }
-                            if (targetThreadId != 0 && targetThreadId != myThreadId && targetThreadId != fgThreadId) {
-                                attachedTarget = AttachThreadInput(myThreadId, targetThreadId, true);
-                            }
-                            
-                            // 现在，我们拥有了合法的最高权限，强制把焦点塞回给游戏！
-                            SetForegroundWindow(prevForegroundWindow); 
-                            
-                            // 事了拂衣去，解绑线程
-                            if (attachedTarget) AttachThreadInput(myThreadId, targetThreadId, false);
-                            if (attachedFg) AttachThreadInput(myThreadId, fgThreadId, false);
-                        }
-                    }
-                }
-            });
-
-            Stopwatch sw = Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 4000) {
-                StringBuilder sb = new StringBuilder(256); GetWindowText(handle, sb, 256);
-                string t = sb.ToString(); if (!string.IsNullOrEmpty(t) && t != "网易云音乐" && IsMatch(t, target)) { _lastTrackTitle = t; break; }
-                Thread.Sleep(50);
-            }
-            
-            Thread.Sleep(_config.RestoreDelayMs); 
-            SetProcessMuteGroup(pids, false, "");
-            
-            _isIntercepting = false; SyncHUD($"[播放] {target.SongName}");
-            WriteLog($"[恢复] 音量已恢复", ConsoleColor.Magenta);
+            _isIntercepting = false; 
+            SyncHUD($"[播放] {target.SongName}");
         }
-        // -----------------------------------------------------
 
         static void HandleDanmaku(byte[] bytes) {
             if (!_acceptingRequests) return;
@@ -1019,10 +1260,7 @@ namespace BiliNetEaseIntegratedApp
                                     }
 
                                     _isPlayingEnabled = true;
-                                    _currentPlayingSong = target; 
-                                    WriteLog($"[指令] {u.Name} 强制立即播放了 {target.SongName}", ConsoleColor.Yellow);
-                                    SyncHUD($"[强制播放] {target.SongName}");
-                                    Task.Run(() => ExecuteIntercept(_cachedPids, _cachedHandle, _lastTrackTitle ?? "", target));
+                                    Task.Run(() => ForcePlaySongAsync(target));
                                 } else {
                                     WriteLog($"   |_ [失败] 无法在队列中找到需强制播放的歌: {kw}", ConsoleColor.Red);
                                 }
@@ -1052,10 +1290,7 @@ namespace BiliNetEaseIntegratedApp
                                     }
 
                                     _isPlayingEnabled = true;
-                                    _currentPlayingSong = target; 
-                                    WriteLog($"[指令] {u.Name} 强制插队播放了 {target.SongName}", ConsoleColor.Yellow);
-                                    SyncHUD($"[插队播放] {target.SongName}");
-                                    Task.Run(() => ExecuteIntercept(_cachedPids, _cachedHandle, _lastTrackTitle ?? "", target));
+                                    Task.Run(() => ForcePlaySongAsync(target));
                                 } else {
                                     WriteLog($"   |_ [失败] 无法在队列中找到需插队播放的歌: {kw}", ConsoleColor.Red);
                                 }
@@ -1078,8 +1313,11 @@ namespace BiliNetEaseIntegratedApp
                                 if (idx != -1) {
                                     var target = _targetQueue[idx];
                                     _targetQueue.RemoveAt(idx);
+                                    _withdrawnSongIds.Add(target.Id); // [新增] 加入撤回黑名单
+                                    MarkQueueDirty(); 
                                     WriteLog($"[指令] {u.Name} 移除了待播歌曲 {target.SongName}", ConsoleColor.Yellow);
                                     SyncHUD($"[移除] {target.SongName}");
+                                    _ = RemoveSongFromPlaylistViaCDP(target.Id); 
                                 }
                             }
                         }
@@ -1101,6 +1339,7 @@ namespace BiliNetEaseIntegratedApp
                                     var target = _targetQueue[idx];
                                     _targetQueue.RemoveAt(idx);
                                     _targetQueue.Insert(0, target);
+                                    MarkQueueDirty(); 
                                     WriteLog($"[指令] {u.Name} 置顶了 {target.SongName}", ConsoleColor.Green);
                                     SyncHUD($"[置顶] {target.SongName}");
                                 } else if (idx == -1) {
@@ -1121,18 +1360,35 @@ namespace BiliNetEaseIntegratedApp
                                 } else {
                                     idx = _targetQueue.FindLastIndex(s => s.OrderedByUid == u.Uid);
                                 }
+
                                 if (idx != -1) {
                                     var target = _targetQueue[idx];
                                     _targetQueue.RemoveAt(idx);
-                                    WriteLog($"   |_ [撤回] 已移除 {target.SongName}", ConsoleColor.Yellow);
+                                    _withdrawnSongIds.Add(target.Id); // [新增] 加入撤回黑名单
+                                    MarkQueueDirty(); 
+                                    WriteLog($"   |_ [撤回] 已移除待播歌曲: {target.SongName}", ConsoleColor.Yellow);
                                     SyncHUD($"[撤回] 成功"); 
+                                    
+                                    _ = RemoveSongFromPlaylistViaCDP(target.Id);
+                                } 
+                                else if (_currentPlayingSong.HasValue && _currentPlayingSong.Value.OrderedByUid == u.Uid && (string.IsNullOrEmpty(kw) || _currentPlayingSong.Value.SongName.ToLower().Contains(kw))) 
+                                {
+                                    var target = _currentPlayingSong.Value;
+                                    WriteLog($"   |_ [撤回] 正在撤回当前播放的歌曲并自动切歌: {target.SongName}", ConsoleColor.Yellow);
+                                    
+                                    _currentPlayingSong = null;
+                                    _ = TrySkipSongAsync();
+                                    _ = RemoveSongFromPlaylistViaCDP(target.Id);
                                 }
                             }
                         }
                         return;
                     }
 
-                    if (msg.StartsWith("点歌")) { string kw = msg.Substring(2).Trim(); if (!string.IsNullOrEmpty(kw)) _ = Task.Run(() => TryRequestSong(u, kw, "normal")); }
+                    if (msg.StartsWith("点歌")) { 
+                        string kw = msg.Substring(2).Trim(); 
+                        if (!string.IsNullOrEmpty(kw)) _ = Task.Run(() => TryRequestSong(u, kw, "normal")); 
+                    }
                     else if (msg == "切歌" || msg == "跳过") TrySkipSong(u);
                 }
             } catch { }
@@ -1179,6 +1435,379 @@ namespace BiliNetEaseIntegratedApp
             }
         }
         static void RestartBiliConnection() { if (!string.IsNullOrWhiteSpace(_config.AuthJson)) { _biliCts.Cancel(); _biliCts = new CancellationTokenSource(); _ = Task.Run(() => StartBiliConnection(_biliCts.Token)); } }
-        #endregion
+
+        static CancellationTokenSource _radarCts = new CancellationTokenSource();
+        static bool _radarRunning = false;
+
+        static void StartCDPRadar() {
+            if (_radarRunning) { _radarCts.Cancel(); _radarCts = new CancellationTokenSource(); }
+            _radarRunning = true;
+            _ = Task.Run(() => CDPRadarLoopAsync(_radarCts.Token));
+        }
+
+        static async Task CDPRadarLoopAsync(CancellationToken ct) {
+            int consecutiveFailures = 0;
+            
+            while (!ct.IsCancellationRequested) {
+                try {
+                    string wsUrl = null;
+                    for (int retry = 0; retry < 30 && !ct.IsCancellationRequested; retry++) {
+                        await Task.Delay(2000, ct);
+                        wsUrl = await GetCDPWebSocketUrl();
+                        if (wsUrl != null) break;
+                    }
+                    if (wsUrl == null) {
+                        WriteLog("[雷达] 30次重试后仍找不到网易云 CDP 目标，60秒后重试...", ConsoleColor.Red);
+                        await Task.Delay(60000, ct);
+                        continue;
+                    }
+                    
+                    if (consecutiveFailures == 0) {
+                        WriteLog("[雷达] 检测到网易云 CDP 目标，正在建立持久监听连接...", ConsoleColor.Cyan);
+                    }
+                    
+                    using var ws = new ClientWebSocket();
+                    ws.Options.KeepAliveInterval = Timeout.InfiniteTimeSpan;
+                    await ws.ConnectAsync(new Uri(wsUrl), ct);
+                    
+                    int cmdId = 1;
+                    
+                    await CDPSend(ws, cmdId++, "Runtime.enable", new { }, ct);
+                    await CDPReadUntilId(ws, cmdId - 1, ct);
+                    
+                    await CDPSend(ws, cmdId++, "Runtime.addBinding", new { name = "__ncmRadarCallback" }, ct);
+                    await CDPReadUntilId(ws, cmdId - 1, ct);
+                    
+                    string radarScript = GetFiberStoreExtractJs() + @"
+                        (function() {
+                            if (!_ensureStore()) { 
+                                window.__ncmRadarCallback(JSON.stringify({ event: 'RADAR_INIT_FAIL', reason: 'no_store' }));
+                                return; 
+                            }
+                            
+                            const deployVersion = Date.now();
+                            
+                            if (window.__radarDeployed && window.__radarSubscribeAlive) {
+                                window.__ncmRadarCallback(JSON.stringify({ event: 'RADAR_ALREADY_DEPLOYED' }));
+                                return;
+                            }
+                            
+                            window.__radarDeployed = true;
+                            window.__radarSubscribeAlive = true;
+
+                            const extractSongInfo = (id, list) => {
+                                if (!id) return null;
+                                const song = list.find(item => String(item.id) === String(id));
+                                if (!song) return null;
+                                return {
+                                    id: String(song.id),
+                                    name: song.track?.name || '未知歌曲',
+                                    artist: song.track?.artists?.map(a => a.name).join('/') || '未知歌手',
+                                    duration: song.track?.duration || 0
+                                };
+                            };
+
+                            let state = window._reduxStore.getState();
+                            let lastTrackId = state.playing?.resourceTrackId || state.playing?.onlineResourceId;
+
+                            window.__ncmRadarCallback(JSON.stringify({ 
+                                event: 'RADAR_INIT_OK', 
+                                currentId: lastTrackId ? String(lastTrackId) : null 
+                            }));
+
+                            window._reduxStore.subscribe(() => {
+                                try {
+                                    state = window._reduxStore.getState();
+                                    const currentTrackId = state.playing?.resourceTrackId || state.playing?.onlineResourceId;
+                                    const curList = state.playingList?.curPlayingList || [];
+
+                                    if (currentTrackId && currentTrackId !== lastTrackId) {
+                                        const prevSong = extractSongInfo(lastTrackId, curList);
+                                        const currentIndex = curList.findIndex(item => String(item.id) === String(currentTrackId));
+                                        let currSong = null;
+                                        let nextSong = null;
+
+                                        if (currentIndex !== -1) {
+                                            currSong = extractSongInfo(currentTrackId, curList);
+                                            if (currentIndex + 1 < curList.length) {
+                                                nextSong = extractSongInfo(curList[currentIndex + 1].id, curList);
+                                            }
+                                        } else {
+                                            currSong = { id: String(currentTrackId), name: '(列表外)', artist: '', duration: 0 };
+                                        }
+
+                                        const payload = {
+                                            event: 'TRACK_CHANGED',
+                                            timestamp: Date.now(),
+                                            previous: prevSong,
+                                            current: currSong,
+                                            next: nextSong
+                                        };
+
+                                        try {
+                                            window.__ncmRadarCallback(JSON.stringify(payload));
+                                        } catch(e) {}
+                                        lastTrackId = currentTrackId;
+                                    }
+                                } catch(e) { }
+                            });
+                        })();
+                    ";
+                    
+                    await CDPSend(ws, cmdId++, "Runtime.evaluate", new { 
+                        expression = radarScript, 
+                        returnByValue = true,
+                        awaitPromise = false 
+                    }, ct);
+                    
+                    WriteLog("[雷达] 挖树 + 切歌雷达脚本已注入，开始持久监听...", ConsoleColor.Green);
+                    consecutiveFailures = 0;
+                    
+                    var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    _ = Task.Run(async () => {
+                        while (!heartbeatCts.Token.IsCancellationRequested) {
+                            try {
+                                await Task.Delay(8000, heartbeatCts.Token);
+                                if (ws.State == WebSocketState.Open) {
+                                    int hbId = Interlocked.Increment(ref cmdId);
+                                    await CDPSend(ws, hbId, "Runtime.evaluate", new { 
+                                        expression = "1", 
+                                        returnByValue = true 
+                                    }, heartbeatCts.Token);
+                                }
+                            } catch { break; }
+                        }
+                    }, heartbeatCts.Token);
+                    
+                    var buffer = new byte[16384];
+                    while (ws.State == WebSocketState.Open && !ct.IsCancellationRequested) {
+                        using var ms = new MemoryStream();
+                        WebSocketReceiveResult wsRes;
+                        do {
+                            wsRes = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                            ms.Write(buffer, 0, wsRes.Count);
+                        } while (!wsRes.EndOfMessage);
+                        
+                        if (wsRes.MessageType == WebSocketMessageType.Close) break;
+                        
+                        string msgJson = Encoding.UTF8.GetString(ms.ToArray());
+                        HandleCDPMessage(msgJson);
+                    }
+                    
+                    heartbeatCts.Cancel();
+                    WriteLog("[雷达] CDP WebSocket 连接已断开，准备重连...", ConsoleColor.Yellow);
+                    
+                } catch (OperationCanceledException) {
+                    break;
+                } catch (Exception ex) {
+                    consecutiveFailures++;
+                    if (consecutiveFailures <= 3 || consecutiveFailures % 10 == 0) {
+                        WriteLog($"[雷达] 连接异常(第{consecutiveFailures}次): {ex.Message}，重连中...", ConsoleColor.Red);
+                    }
+                    if (!ct.IsCancellationRequested) {
+                        int delay = Math.Min(3000 * consecutiveFailures, 30000);
+                        await Task.Delay(delay, ct);
+                    }
+                }
+            }
+            _radarRunning = false;
+        }
+
+        static async Task<string> GetCDPWebSocketUrl() {
+            try {
+                using var httpClient = new HttpClient();
+                httpClient.Timeout = TimeSpan.FromSeconds(2);
+                var jsonStr = await httpClient.GetStringAsync($"http://127.0.0.1:{_config.CdpPort}/json");
+                var targets = JsonDocument.Parse(jsonStr).RootElement;
+                
+                foreach (var t in targets.EnumerateArray()) {
+                    if (t.GetProperty("type").GetString() == "page" && t.GetProperty("url").GetString().Contains("orpheus")) {
+                        return t.GetProperty("webSocketDebuggerUrl").GetString();
+                    }
+                }
+                foreach (var t in targets.EnumerateArray()) {
+                    if (t.GetProperty("type").GetString() == "page") {
+                        return t.GetProperty("webSocketDebuggerUrl").GetString();
+                    }
+                }
+            } catch { }
+            return null;
+        }
+
+        static async Task CDPSend(ClientWebSocket ws, int id, string method, object @params, CancellationToken ct) {
+            var payload = new Dictionary<string, object> { { "id", id }, { "method", method }, { "params", @params } };
+            var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(payload));
+            await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, ct);
+        }
+
+        static async Task CDPReadUntilId(ClientWebSocket ws, int targetId, CancellationToken ct) {
+            var buffer = new byte[8192];
+            for (int i = 0; i < 50; i++) {
+                using var ms = new MemoryStream();
+                WebSocketReceiveResult wsRes;
+                do {
+                    wsRes = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct);
+                    ms.Write(buffer, 0, wsRes.Count);
+                } while (!wsRes.EndOfMessage);
+                
+                string json = Encoding.UTF8.GetString(ms.ToArray());
+                try {
+                    var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.TryGetProperty("id", out var idProp) && idProp.GetInt32() == targetId) {
+                        return; 
+                    }
+                    HandleCDPMessage(json);
+                } catch { }
+            }
+        }
+
+        static void HandleCDPMessage(string msgJson) {
+            try {
+                var doc = JsonDocument.Parse(msgJson);
+                
+                if (doc.RootElement.TryGetProperty("id", out _)) return;
+                if (!doc.RootElement.TryGetProperty("method", out var methodProp)) return;
+                string method = methodProp.GetString();
+                
+                if (method == "Runtime.bindingCalled") {
+                    var paramsEl = doc.RootElement.GetProperty("params");
+                    string bindingName = paramsEl.GetProperty("name").GetString();
+                    
+                    if (bindingName != "__ncmRadarCallback") return;
+                    
+                    string payloadStr = paramsEl.GetProperty("payload").GetString();
+                    var payload = JsonDocument.Parse(payloadStr).RootElement;
+                    string eventType = payload.GetProperty("event").GetString();
+                    
+                    switch (eventType) {
+                        case "RADAR_INIT_OK":
+                            string initId = payload.TryGetProperty("currentId", out var cid) && cid.ValueKind != JsonValueKind.Null ? cid.GetString() : "无";
+                            WriteLog($"[雷达] ✅ 切歌雷达初始化成功！当前锚点 ID: {initId}", ConsoleColor.Green);
+                            break;
+                            
+                        case "RADAR_INIT_FAIL":
+                            string reason = payload.TryGetProperty("reason", out var r) ? r.GetString() : "未知";
+                            WriteLog($"[雷达] ⚠️ 雷达初始化失败: {reason}，将自动重试", ConsoleColor.Yellow);
+                            break;
+                            
+                        case "RADAR_ALREADY_DEPLOYED":
+                            WriteLog("[雷达] 雷达已存在，跳过重复部署", ConsoleColor.DarkGray);
+                            break;
+                            
+                        case "TRACK_CHANGED":
+                            string prevName = "无", prevArtist = "", prevId = "";
+                            string currName = "无", currArtist = "", currId = "";
+                            string nextName = "无", nextArtist = "", nextId = "";
+                            
+                            if (payload.TryGetProperty("previous", out var prev) && prev.ValueKind != JsonValueKind.Null) {
+                                prevName = prev.TryGetProperty("name", out var pn) ? pn.GetString() : "无";
+                                prevArtist = prev.TryGetProperty("artist", out var pa) ? pa.GetString() : "";
+                                prevId = prev.TryGetProperty("id", out var pi) ? pi.GetString() : "";
+                            }
+                            if (payload.TryGetProperty("current", out var curr) && curr.ValueKind != JsonValueKind.Null) {
+                                currName = curr.TryGetProperty("name", out var cn) ? cn.GetString() : "无";
+                                currArtist = curr.TryGetProperty("artist", out var ca) ? ca.GetString() : "";
+                                currId = curr.TryGetProperty("id", out var ci) ? ci.GetString() : "";
+                            }
+                            if (payload.TryGetProperty("next", out var next) && next.ValueKind != JsonValueKind.Null) {
+                                nextName = next.TryGetProperty("name", out var nn) ? nn.GetString() : "无";
+                                nextArtist = next.TryGetProperty("artist", out var na) ? na.GetString() : "";
+                                nextId = next.TryGetProperty("id", out var ni) ? ni.GetString() : "";
+                            }
+                            
+                            WriteLog($"[雷达] 🔔 切歌信号！", ConsoleColor.Magenta);
+                            WriteLog($"   ⏮️ 上一首: {prevArtist}{(string.IsNullOrEmpty(prevArtist) ? "" : " - ")}{prevName} ({prevId})", ConsoleColor.DarkGray);
+                            WriteLog($"   ▶️ 正在播: {currArtist}{(string.IsNullOrEmpty(currArtist) ? "" : " - ")}{currName} ({currId})", ConsoleColor.White);
+                            WriteLog($"   ⏭️ 下一首: {nextArtist}{(string.IsNullOrEmpty(nextArtist) ? "" : " - ")}{nextName} ({nextId})", ConsoleColor.DarkGray);
+
+                            // ============================================
+                            // ★★★ 核心修复：基于雷达信号实时同步队列状态 ★★★
+                            // ============================================
+                            bool stateChanged = false;
+                            SongInfo? songToForcePlay = null;
+
+                            lock (_queueLock) {
+                                if (!string.IsNullOrEmpty(currId)) {
+                                    // [新增] 检查当前播放的歌曲是否是已经被撤回/移除的失效残歌
+                                    if (_withdrawnSongIds.Contains(currId)) {
+                                        WriteLog($"[防残歌系统/雷达] 发现网易云播放了已被撤回的残余歌曲，正在自动跳过: {currName}", ConsoleColor.Yellow);
+                                        _withdrawnSongIds.Remove(currId); // 移出黑名单
+                                        _lastTrackTitle = currId; // 更新规避标记
+                                        _ = TrySkipSongAsync(); // 直接跳过
+                                    } 
+                                    else {
+                                        // 防止网易云可能触发重复当前歌曲的事件
+                                        if (_currentPlayingSong.HasValue && currId == _currentPlayingSong.Value.Id) {
+                                            // 正常播放中，无需动作
+                                        }
+                                        else if (_currentPlayingSong.HasValue && currId != _currentPlayingSong.Value.Id) {
+                                            // A. 正在播的点播歌已结束 或被切走了
+                                            if (_isPlayingEnabled && _targetQueue.Count > 0 && currId == _targetQueue[0].Id) {
+                                                // A1. 完美衔接：切到的歌刚好是队列的下一首点歌
+                                                WriteLog($"[状态同步] 自然衔接到下一首: {_targetQueue[0].SongName}", ConsoleColor.Green);
+                                                _currentPlayingSong = _targetQueue[0];
+                                                _targetQueue.RemoveAt(0);
+                                                stateChanged = true;
+                                            }
+                                            else if (_isPlayingEnabled && _targetQueue.Count > 0) {
+                                                // A2. 切偏了：切到的歌不是期望的下一首，强制纠正回去
+                                                if ((DateTime.Now - _lastForcePlayTime).TotalSeconds > 2.5) {
+                                                    WriteLog($"[状态同步] 播完后切偏！期望={_targetQueue[0].SongName}，实际={currName}，将强行纠正", ConsoleColor.Yellow);
+                                                    songToForcePlay = _targetQueue[0];
+                                                    _targetQueue.RemoveAt(0);
+                                                }
+                                            }
+                                            else {
+                                                // A3. 点播队列已空，恢复无点歌空闲状态
+                                                WriteLog($"[状态同步] 点播列表已全数播完，回到空闲状态", ConsoleColor.DarkGray);
+                                                _currentPlayingSong = null;
+                                                stateChanged = true;
+                                            }
+                                        }
+                                        else if (!_currentPlayingSong.HasValue && _isPlayingEnabled && _targetQueue.Count > 0) {
+                                            // B. 当前没有点播显示在播，但突然切到了一首歌（网易云自动切歌，或者我们拖回了歌）
+                                            if (currId == _targetQueue[0].Id) {
+                                                WriteLog($"[状态同步] 自然衔接，开始播放队首点歌: {_targetQueue[0].SongName}", ConsoleColor.Green);
+                                                _currentPlayingSong = _targetQueue[0];
+                                                _targetQueue.RemoveAt(0);
+                                                stateChanged = true;
+                                            } else {
+                                                // 切歌信号来了！当前空闲，代播有歌。
+                                                // 需求2：只要有切歌信号而且代播有歌，立刻强制拉起代播列表！
+                                                // 特殊情况排除：如果是刚刚拖拽退回引起的切歌，跳过拦截，让原歌单的歌放。
+                                                if ((DateTime.Now - _lastPushToQueueTime).TotalSeconds < 2.5) {
+                                                    WriteLog($"[状态同步] 这是拖拽退回触发的特殊切歌，已放行原歌单曲目...", ConsoleColor.DarkGray);
+                                                } else {
+                                                    WriteLog($"[状态同步] 捕捉到切歌信号！强制拉起代播列表首曲: {_targetQueue[0].SongName}", ConsoleColor.Magenta);
+                                                    songToForcePlay = _targetQueue[0];
+                                                    _targetQueue.RemoveAt(0);
+                                                }
+                                            }
+                                        }
+                                        
+                                        _lastTrackTitle = currId; // 更新给 MonitorLoop 作为规避防撞标
+                                    }
+                                }
+                            }
+
+                            // 如果内部状态变更了，调用 SyncHUD 促发前端更新视图
+                            if (stateChanged) {
+                                SyncHUD(_currentPlayingSong.HasValue ? $"[播放] {_currentPlayingSong.Value.SongName}" : "准备就绪");
+                            }
+
+                            // 如果发现了需要强制播放的歌，启动强行播放逻辑 (这套逻辑内部已包含了添加下一首到接下来的功能)
+                            if (songToForcePlay.HasValue) {
+                                _lastForcePlayTime = DateTime.Now;
+                                _ = Task.Run(() => ForcePlaySongAsync(songToForcePlay.Value));
+                            }
+                            
+                            // 标记队列已改变，让原有的 MonitorLoop 在下次循环时预加载下一首歌曲
+                            MarkQueueDirty();
+                            
+                            break;
+                    }
+                }
+            } catch { }
+        }
     }
 }
