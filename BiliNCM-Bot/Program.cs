@@ -110,7 +110,7 @@ namespace BiliNetEaseIntegratedApp
         static AppConfig _config = new AppConfig();
         static CloudMusicApi _neteaseApi = new CloudMusicApi();
         static List<SongInfo> _targetQueue = new List<SongInfo>(); 
-        static HashSet<string> _withdrawnSongIds = new HashSet<string>(); // [新增] 撤回/残余歌曲黑名单
+        static HashSet<string> _withdrawnSongIds = new HashSet<string>(); 
         static readonly object _queueLock = new object();
         
         static ConcurrentDictionary<string, DateTime> _userCooldowns = new ConcurrentDictionary<string, DateTime>();
@@ -641,21 +641,48 @@ namespace BiliNetEaseIntegratedApp
             }
         }
 
+        // ====== 更新的 Fiber Store 挖掘算法 (加入了 Debug Log 与新版 React 兼容) ======
         static string GetFiberStoreExtractJs() {
             return @"
                 function _ensureStore() {
-                    if (window._reduxStore) return true;
-                    const root = window._fiberRoot || (document.querySelector('#root') && document.querySelector('#root')._reactRootContainer && document.querySelector('#root')._reactRootContainer._internalRoot);
-                    if (!root) return false;
+                    window.__debug_store_log = window.__debug_store_log || [];
+                    const log = (msg) => { window.__debug_store_log.push(msg); };
+                    
+                    if (window._reduxStore) { log('Store缓存已存在'); return true; }
+                    
+                    const rootEl = document.querySelector('#root');
+                    const root = window._fiberRoot || (rootEl && rootEl._reactRootContainer && rootEl._reactRootContainer._internalRoot);
+                    
+                    if (!root) { 
+                        log('找不到 React 根节点，网易云页面可能还在加载中...'); 
+                        return false; 
+                    }
+
+                    log('正在顺藤摸瓜，往下挖 Redux Store...');
                     let queue = [root.current || root];
+                    let visited = 0;
+                    
                     while (queue.length > 0) {
                         let node = queue.shift();
                         if (!node) continue;
-                        if (node.memoizedProps && node.memoizedProps.store) { window._reduxStore = node.memoizedProps.store; return true; }
-                        if (node.stateNode && node.stateNode.store) { window._reduxStore = node.stateNode.store; return true; }
+                        visited++;
+                        if (visited > 20000) { log('防死循环: 遍历超过 20000 节点，强制终止'); break; }
+                        
+                        if (node.memoizedProps && node.memoizedProps.store) { 
+                            window._reduxStore = node.memoizedProps.store; 
+                            log(`🎉 抓到了！在第 ${visited} 节点的 (memoizedProps) 中提取到 Store`); 
+                            return true; 
+                        }
+                        if (node.stateNode && node.stateNode.store) { 
+                            window._reduxStore = node.stateNode.store; 
+                            log(`🎉 抓到了！在第 ${visited} 节点的 (stateNode) 中提取到 Store`); 
+                            return true; 
+                        }
+                        
                         let child = node.child;
                         while (child) { queue.push(child); child = child.sibling; }
                     }
+                    log(`😭 失败: 遍历了整棵树，没找到 store...`);
                     return false;
                 }
             ";
@@ -663,6 +690,7 @@ namespace BiliNetEaseIntegratedApp
 
         static async Task<bool> InsertNextSongViaCDP(string songId) {
             string js = GetFiberStoreExtractJs() + $@"
+                window.__debug_store_log = []; // 清空之前的日志
                 if (_ensureStore()) {{
                     window._reduxStore.dispatch({{
                         type: 'async:action/doAction',
@@ -912,7 +940,7 @@ namespace BiliNetEaseIntegratedApp
                 string insertSongId = null;
 
                 lock (_queueLock) { 
-                    _withdrawnSongIds.Remove(newSong.Id); // [新增] 若再次点歌，将其移出黑名单，让其恢复正常可播放状态
+                    _withdrawnSongIds.Remove(newSong.Id); 
                     
                     if (mode == "play_now_drop" || mode == "play_now_keep") {
                         if (mode == "play_now_keep" && _currentPlayingSong.HasValue) {
@@ -1023,7 +1051,6 @@ namespace BiliNetEaseIntegratedApp
                                 bool ncmTrackChanged = (currentId != _lastTrackTitle);
                                 _lastTrackTitle = currentId;
                                 
-                                // MonitorLoop 现在作为备用方案，防雷达漏掉消息
                                 if (ncmTrackChanged) {
                                     if (_withdrawnSongIds.Contains(currentId)) {
                                         WriteLog($"[防残歌系统/监控] 发现网易云播放了已被撤回/移除的歌曲，正在自动跳过: {currentId}", ConsoleColor.Yellow);
@@ -1032,9 +1059,7 @@ namespace BiliNetEaseIntegratedApp
                                     } else {
                                         if (_config.ShowDebugLogs) WriteLog($"[监控] 网易云切歌信号: newId={currentId}, 当前点播={_currentPlayingSong?.Id ?? "无"}, 队首={(_targetQueue.Count > 0 ? _targetQueue[0].Id : "空")}", ConsoleColor.DarkGray);
                                         
-                                        if (_currentPlayingSong.HasValue && currentId == _currentPlayingSong.Value.Id) {
-                                            // 正常
-                                        }
+                                        if (_currentPlayingSong.HasValue && currentId == _currentPlayingSong.Value.Id) { }
                                         else if (_currentPlayingSong.HasValue && currentId != _currentPlayingSong.Value.Id) {
                                             if (_isPlayingEnabled && _targetQueue.Count > 0 && currentId == _targetQueue[0].Id) {
                                                 WriteLog($"[监控] 自然衔接成功: {_targetQueue[0].SongName}", ConsoleColor.Green);
@@ -1313,7 +1338,7 @@ namespace BiliNetEaseIntegratedApp
                                 if (idx != -1) {
                                     var target = _targetQueue[idx];
                                     _targetQueue.RemoveAt(idx);
-                                    _withdrawnSongIds.Add(target.Id); // [新增] 加入撤回黑名单
+                                    _withdrawnSongIds.Add(target.Id); 
                                     MarkQueueDirty(); 
                                     WriteLog($"[指令] {u.Name} 移除了待播歌曲 {target.SongName}", ConsoleColor.Yellow);
                                     SyncHUD($"[移除] {target.SongName}");
@@ -1364,7 +1389,7 @@ namespace BiliNetEaseIntegratedApp
                                 if (idx != -1) {
                                     var target = _targetQueue[idx];
                                     _targetQueue.RemoveAt(idx);
-                                    _withdrawnSongIds.Add(target.Id); // [新增] 加入撤回黑名单
+                                    _withdrawnSongIds.Add(target.Id); 
                                     MarkQueueDirty(); 
                                     WriteLog($"   |_ [撤回] 已移除待播歌曲: {target.SongName}", ConsoleColor.Yellow);
                                     SyncHUD($"[撤回] 成功"); 
@@ -1479,16 +1504,27 @@ namespace BiliNetEaseIntegratedApp
                     await CDPReadUntilId(ws, cmdId - 1, ct);
                     
                     string radarScript = GetFiberStoreExtractJs() + @"
-                        (function() {
+                        (function initRadar() {
+                            window.__debug_store_log = []; // 进雷达前清空
                             if (!_ensureStore()) { 
-                                window.__ncmRadarCallback(JSON.stringify({ event: 'RADAR_INIT_FAIL', reason: 'no_store' }));
+                                try {
+                                    window.__ncmRadarCallback(JSON.stringify({ 
+                                        event: 'RADAR_INIT_RETRYING', 
+                                        reason: 'not_ready',
+                                        debugLog: window.__debug_store_log.join(' | ') 
+                                    }));
+                                } catch(e) {}
+                                setTimeout(initRadar, 1500); // 核心修复：1.5秒后自动重试挖树
                                 return; 
                             }
                             
                             const deployVersion = Date.now();
                             
                             if (window.__radarDeployed && window.__radarSubscribeAlive) {
-                                window.__ncmRadarCallback(JSON.stringify({ event: 'RADAR_ALREADY_DEPLOYED' }));
+                                window.__ncmRadarCallback(JSON.stringify({ 
+                                    event: 'RADAR_ALREADY_DEPLOYED',
+                                    debugLog: window.__debug_store_log.join(' | ')
+                                }));
                                 return;
                             }
                             
@@ -1512,7 +1548,8 @@ namespace BiliNetEaseIntegratedApp
 
                             window.__ncmRadarCallback(JSON.stringify({ 
                                 event: 'RADAR_INIT_OK', 
-                                currentId: lastTrackId ? String(lastTrackId) : null 
+                                currentId: lastTrackId ? String(lastTrackId) : null,
+                                debugLog: window.__debug_store_log.join(' | ') 
                             }));
 
                             window._reduxStore.subscribe(() => {
@@ -1682,16 +1719,26 @@ namespace BiliNetEaseIntegratedApp
                     switch (eventType) {
                         case "RADAR_INIT_OK":
                             string initId = payload.TryGetProperty("currentId", out var cid) && cid.ValueKind != JsonValueKind.Null ? cid.GetString() : "无";
+                            string debugOk = payload.TryGetProperty("debugLog", out var dOk) && dOk.ValueKind != JsonValueKind.Null ? dOk.GetString() : "";
                             WriteLog($"[雷达] ✅ 切歌雷达初始化成功！当前锚点 ID: {initId}", ConsoleColor.Green);
+                            if (!string.IsNullOrEmpty(debugOk)) WriteLog($"   |_ [挖树细节] {debugOk}", ConsoleColor.DarkGray);
                             break;
                             
+                        case "RADAR_INIT_RETRYING":
+                            // 页面还在加载中，雷达正在不断轮询重试。为了不刷屏，这里静默处理（不输出到控制台）。
+                            break;
+
                         case "RADAR_INIT_FAIL":
                             string reason = payload.TryGetProperty("reason", out var r) ? r.GetString() : "未知";
-                            WriteLog($"[雷达] ⚠️ 雷达初始化失败: {reason}，将自动重试", ConsoleColor.Yellow);
+                            string debugFail = payload.TryGetProperty("debugLog", out var dFail) && dFail.ValueKind != JsonValueKind.Null ? dFail.GetString() : "";
+                            WriteLog($"[雷达] ⚠️ 雷达初始化失败 ({reason})，将自动重试", ConsoleColor.Yellow);
+                            if (!string.IsNullOrEmpty(debugFail)) WriteLog($"   |_ [挖树失败细节] {debugFail}", ConsoleColor.Red);
                             break;
                             
                         case "RADAR_ALREADY_DEPLOYED":
+                            string debugDup = payload.TryGetProperty("debugLog", out var dDup) && dDup.ValueKind != JsonValueKind.Null ? dDup.GetString() : "";
                             WriteLog("[雷达] 雷达已存在，跳过重复部署", ConsoleColor.DarkGray);
+                            if (!string.IsNullOrEmpty(debugDup)) WriteLog($"   |_ [挖树细节] {debugDup}", ConsoleColor.DarkGray);
                             break;
                             
                         case "TRACK_CHANGED":
@@ -1720,37 +1767,28 @@ namespace BiliNetEaseIntegratedApp
                             WriteLog($"   ▶️ 正在播: {currArtist}{(string.IsNullOrEmpty(currArtist) ? "" : " - ")}{currName} ({currId})", ConsoleColor.White);
                             WriteLog($"   ⏭️ 下一首: {nextArtist}{(string.IsNullOrEmpty(nextArtist) ? "" : " - ")}{nextName} ({nextId})", ConsoleColor.DarkGray);
 
-                            // ============================================
-                            // ★★★ 核心修复：基于雷达信号实时同步队列状态 ★★★
-                            // ============================================
                             bool stateChanged = false;
                             SongInfo? songToForcePlay = null;
 
                             lock (_queueLock) {
                                 if (!string.IsNullOrEmpty(currId)) {
-                                    // [新增] 检查当前播放的歌曲是否是已经被撤回/移除的失效残歌
                                     if (_withdrawnSongIds.Contains(currId)) {
                                         WriteLog($"[防残歌系统/雷达] 发现网易云播放了已被撤回的残余歌曲，正在自动跳过: {currName}", ConsoleColor.Yellow);
-                                        _withdrawnSongIds.Remove(currId); // 移出黑名单
-                                        _lastTrackTitle = currId; // 更新规避标记
-                                        _ = TrySkipSongAsync(); // 直接跳过
+                                        _withdrawnSongIds.Remove(currId); 
+                                        _lastTrackTitle = currId; 
+                                        _ = TrySkipSongAsync(); 
                                     } 
                                     else {
-                                        // 防止网易云可能触发重复当前歌曲的事件
                                         if (_currentPlayingSong.HasValue && currId == _currentPlayingSong.Value.Id) {
-                                            // 正常播放中，无需动作
                                         }
                                         else if (_currentPlayingSong.HasValue && currId != _currentPlayingSong.Value.Id) {
-                                            // A. 正在播的点播歌已结束 或被切走了
                                             if (_isPlayingEnabled && _targetQueue.Count > 0 && currId == _targetQueue[0].Id) {
-                                                // A1. 完美衔接：切到的歌刚好是队列的下一首点歌
                                                 WriteLog($"[状态同步] 自然衔接到下一首: {_targetQueue[0].SongName}", ConsoleColor.Green);
                                                 _currentPlayingSong = _targetQueue[0];
                                                 _targetQueue.RemoveAt(0);
                                                 stateChanged = true;
                                             }
                                             else if (_isPlayingEnabled && _targetQueue.Count > 0) {
-                                                // A2. 切偏了：切到的歌不是期望的下一首，强制纠正回去
                                                 if ((DateTime.Now - _lastForcePlayTime).TotalSeconds > 2.5) {
                                                     WriteLog($"[状态同步] 播完后切偏！期望={_targetQueue[0].SongName}，实际={currName}，将强行纠正", ConsoleColor.Yellow);
                                                     songToForcePlay = _targetQueue[0];
@@ -1758,23 +1796,18 @@ namespace BiliNetEaseIntegratedApp
                                                 }
                                             }
                                             else {
-                                                // A3. 点播队列已空，恢复无点歌空闲状态
                                                 WriteLog($"[状态同步] 点播列表已全数播完，回到空闲状态", ConsoleColor.DarkGray);
                                                 _currentPlayingSong = null;
                                                 stateChanged = true;
                                             }
                                         }
                                         else if (!_currentPlayingSong.HasValue && _isPlayingEnabled && _targetQueue.Count > 0) {
-                                            // B. 当前没有点播显示在播，但突然切到了一首歌（网易云自动切歌，或者我们拖回了歌）
                                             if (currId == _targetQueue[0].Id) {
                                                 WriteLog($"[状态同步] 自然衔接，开始播放队首点歌: {_targetQueue[0].SongName}", ConsoleColor.Green);
                                                 _currentPlayingSong = _targetQueue[0];
                                                 _targetQueue.RemoveAt(0);
                                                 stateChanged = true;
                                             } else {
-                                                // 切歌信号来了！当前空闲，代播有歌。
-                                                // 需求2：只要有切歌信号而且代播有歌，立刻强制拉起代播列表！
-                                                // 特殊情况排除：如果是刚刚拖拽退回引起的切歌，跳过拦截，让原歌单的歌放。
                                                 if ((DateTime.Now - _lastPushToQueueTime).TotalSeconds < 2.5) {
                                                     WriteLog($"[状态同步] 这是拖拽退回触发的特殊切歌，已放行原歌单曲目...", ConsoleColor.DarkGray);
                                                 } else {
@@ -1785,23 +1818,20 @@ namespace BiliNetEaseIntegratedApp
                                             }
                                         }
                                         
-                                        _lastTrackTitle = currId; // 更新给 MonitorLoop 作为规避防撞标
+                                        _lastTrackTitle = currId; 
                                     }
                                 }
                             }
 
-                            // 如果内部状态变更了，调用 SyncHUD 促发前端更新视图
                             if (stateChanged) {
                                 SyncHUD(_currentPlayingSong.HasValue ? $"[播放] {_currentPlayingSong.Value.SongName}" : "准备就绪");
                             }
 
-                            // 如果发现了需要强制播放的歌，启动强行播放逻辑 (这套逻辑内部已包含了添加下一首到接下来的功能)
                             if (songToForcePlay.HasValue) {
                                 _lastForcePlayTime = DateTime.Now;
                                 _ = Task.Run(() => ForcePlaySongAsync(songToForcePlay.Value));
                             }
                             
-                            // 标记队列已改变，让原有的 MonitorLoop 在下次循环时预加载下一首歌曲
                             MarkQueueDirty();
                             
                             break;
